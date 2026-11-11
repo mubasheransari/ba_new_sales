@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:http/http.dart' as http;
 import 'package:ords_ba/Api_config/api_config.dart';
 import 'package:ords_ba/Data/device_id.dart';
@@ -29,10 +30,12 @@ class ApiException implements Exception {
 class CnicCheckResult {
   final bool allowed;
   final String message;
+  final String? fullName;
 
   const CnicCheckResult({
     required this.allowed,
     required this.message,
+    this.fullName,
   });
 }
 
@@ -249,9 +252,7 @@ class Repository {
       if (data is List) {
         items = data;
       } else if (data is Map) {
-        final value = data['items'] ??
-            data['data'] ??
-            data['results'];
+        final value = data['items'] ?? data['data'] ?? data['results'];
 
         if (value is List) {
           items = value;
@@ -272,9 +273,7 @@ class Repository {
         if (nextValue is Map && nextValue[r'$ref'] != null) {
           final nextRef = nextValue[r'$ref'].toString();
 
-          next = Uri.parse(currentUrl)
-              .resolve(nextRef)
-              .toString();
+          next = Uri.parse(currentUrl).resolve(nextRef).toString();
         }
 
         if (data['hasMore'] == false) {
@@ -331,13 +330,18 @@ class Repository {
 
   /// Verifies that a CNIC exists in the active BA registration allowlist.
   /// CNIC is sent as 13 digits without hyphens.
+  ///
+  /// Expected successful response:
+  /// {
+  ///   "success": true,
+  ///   "allowed": true,
+  ///   "message": "CNIC verified successfully.",
+  ///   "full_name": "Fatima Abu Talib"
+  /// }
   Future<CnicCheckResult> checkBaCnic({
     required String cnic,
   }) async {
-    final normalizedCnic = cnic.replaceAll(
-      RegExp(r'\D'),
-      '',
-    );
+    final normalizedCnic = cnic.replaceAll(RegExp(r'\D'), '');
 
     if (normalizedCnic.length != 13) {
       throw const ApiException(
@@ -355,6 +359,8 @@ class Repository {
       ),
     );
 
+    debugPrint('CNIC CHECK RESPONSE: $data');
+
     final responseMap = _findMap(data);
 
     final allowed = responseMap?['allowed'] == true ||
@@ -365,10 +371,82 @@ class Repository {
             ? 'CNIC is authorized for BA registration.'
             : 'This CNIC is not authorized for BA registration.');
 
+    // The updated ORDS handler returns FULL_NAME as "full_name".
+    // Fallback keys are retained for compatibility with older responses.
+    final fullName = allowed
+        ? _findBaName(data)
+        : null;
+
     return CnicCheckResult(
       allowed: allowed,
       message: message,
+      fullName: fullName,
     );
+  }
+
+  /// Finds the registered BA name in the response.
+  /// Supports full_name and common alternative response keys.
+  String? _findBaName(dynamic data, [int depth = 0]) {
+    if (depth > 4) return null;
+
+    if (data is List) {
+      for (final item in data) {
+        final found = _findBaName(item, depth + 1);
+        if (found != null) return found;
+      }
+      return null;
+    }
+
+    if (data is! Map) return null;
+
+    final map = <String, dynamic>{
+      for (final entry in data.entries)
+        entry.key.toString().toLowerCase(): entry.value,
+    };
+
+    String? text(dynamic value) {
+      if (value is String && value.trim().isNotEmpty) {
+        return value.trim();
+      }
+      return null;
+    }
+
+    for (final key in [
+      'full_name',
+      'fullname',
+      'ba_name',
+      'baname',
+      'ba_full_name',
+      'employee_name',
+      'emp_name',
+      'name',
+    ]) {
+      final value = text(map[key]);
+      if (value != null) return value;
+    }
+
+    for (final entry in map.entries) {
+      final key = entry.key;
+
+      if (!key.contains('name')) continue;
+
+      if (key.contains('location') ||
+          key.contains('file') ||
+          key.contains('area') ||
+          key.contains('mart')) {
+        continue;
+      }
+
+      final value = text(entry.value);
+      if (value != null) return value;
+    }
+
+    for (final value in map.values) {
+      final found = _findBaName(value, depth + 1);
+      if (found != null) return found;
+    }
+
+    return null;
   }
 
   Future<String> signup({
@@ -379,10 +457,7 @@ class Repository {
     required String confirmPassword,
     required int locationId,
   }) async {
-    final normalizedCnic = cnic.replaceAll(
-      RegExp(r'\D'),
-      '',
-    );
+    final normalizedCnic = cnic.replaceAll(RegExp(r'\D'), '');
 
     if (normalizedCnic.length != 13) {
       throw const ApiException(
@@ -407,8 +482,7 @@ class Repository {
       ),
     );
 
-    return _messageOf(data) ??
-        'Account created. Please login.';
+    return _messageOf(data) ?? 'Account created. Please login.';
   }
 
   Future<LoginResult> login({
@@ -635,17 +709,14 @@ class Repository {
     }
 
     output.sort((a, b) {
-      final groupCompare = a.group
-          .toLowerCase()
-          .compareTo(b.group.toLowerCase());
+      final groupCompare =
+          a.group.toLowerCase().compareTo(b.group.toLowerCase());
 
       if (groupCompare != 0) {
         return groupCompare;
       }
 
-      return a.itemName
-          .toLowerCase()
-          .compareTo(b.itemName.toLowerCase());
+      return a.itemName.toLowerCase().compareTo(b.itemName.toLowerCase());
     });
 
     return output;
@@ -692,9 +763,7 @@ class Repository {
   }) async {
     final lower = fileName.toLowerCase();
 
-    final mime = lower.endsWith('.png')
-        ? 'image/png'
-        : 'image/jpeg';
+    final mime = lower.endsWith('.png') ? 'image/png' : 'image/jpeg';
 
     final data = await _send(
       () => _client.post(
@@ -741,8 +810,7 @@ class Repository {
             for (final id in skuIds)
               {
                 'sku_id': id,
-                'question_ids':
-                    questionsBySku[id] ?? const <int>[],
+                'question_ids': questionsBySku[id] ?? const <int>[],
               },
           ],
         }),
@@ -849,8 +917,7 @@ class Repository {
 
     return [
       for (final item in list)
-        if (item is Map)
-          Map<String, dynamic>.from(item),
+        if (item is Map) Map<String, dynamic>.from(item),
     ];
   }
 
@@ -999,10 +1066,8 @@ class Repository {
         body: jsonEncode({
           'title': title,
           'description': description,
-          if (image != null)
-            'image_base64': base64Encode(image),
-          if (image != null)
-            'image_mime': 'image/jpeg',
+          if (image != null) 'image_base64': base64Encode(image),
+          if (image != null) 'image_mime': 'image/jpeg',
         }),
       ),
       timeout: ApiConfig.uploadTimeout,
@@ -1029,18 +1094,14 @@ class Repository {
         headers: _headers(token: token),
         body: jsonEncode({
           'message': message,
-          if (image != null)
-            'image_base64': base64Encode(image),
-          if (image != null)
-            'image_mime': 'image/jpeg',
+          if (image != null) 'image_base64': base64Encode(image),
+          if (image != null) 'image_mime': 'image/jpeg',
         }),
       ),
       timeout: ApiConfig.uploadTimeout,
     );
 
-    return data is Map
-        ? '${data['status'] ?? ''}'.toUpperCase()
-        : '';
+    return data is Map ? '${data['status'] ?? ''}'.toUpperCase() : '';
   }
 
   Future<String> setComplaintStatus({
@@ -1072,9 +1133,7 @@ class Repository {
     try {
       response = await _client
           .get(
-            Uri.parse(
-              ApiConfig.complaintImage(messageId),
-            ),
+            Uri.parse(ApiConfig.complaintImage(messageId)),
             headers: _headers(
               token: token,
               json: false,
@@ -1095,8 +1154,7 @@ class Repository {
       );
     }
 
-    final contentType =
-        response.headers['content-type'] ?? '';
+    final contentType = response.headers['content-type'] ?? '';
 
     if (response.statusCode != 200 ||
         !contentType.startsWith('image/')) {
